@@ -1,0 +1,24 @@
+name: Sentinel
+version: '${version}'
+main: dev.sentinel.Sentinel
+# If your server refuses to load the plugin because of this line, try '26.1'.
+api-version: '26.2'
+description: Event-based PvP anticheat for Paper
+authors: [Sentinel]
+
+commands:
+  sentinel:
+    description: Sentinel anticheat command
+    aliases: [ac, sac]
+    usage: /<command> <alerts|info|reset|reload>
+
+permissions:
+  sentinel.admin:
+    description: Use /sentinel info, reset and reload
+    default: op
+  sentinel.alerts:
+    description: Receive cheat alerts
+    default: op
+  sentinel.bypass:
+    description: Exempt from all checks
+    default: false
