@@ -65,9 +65,14 @@ public final class BlockListener implements Listener {
             return;
         }
         boolean cancel = false;
+        // only blocks the client actually started digging count (ignores veinminer/treecapitator plugins)
+        boolean clientDig = d.breakKey == Phys.key(b);
+        boolean lagging = now < d.lagUntil;
+        double rotTol = (now - d.rotMs < 150)
+                ? Math.min(1.0, Math.toRadians(d.yawDelta + d.pitchDelta) * 4.0) : 0.0;
 
         // ---- FastBreak ----
-        if (plugin.enabled("fastbreak") && !d.breakInsta && d.breakKey == Phys.key(b)) {
+        if (plugin.enabled("fastbreak") && !d.breakInsta && clientDig && !lagging) {
             float speed = b.getBreakSpeed(p);
             if (speed > 0f && speed < 1f) {
                 long expected = (long) (Math.ceil(1.0 / speed) * 50.0);
@@ -86,7 +91,7 @@ public final class BlockListener implements Listener {
         d.digging = false;
 
         // ---- Nuker (many blocks per tick / per second) ----
-        if (plugin.enabled("nuker")) {
+        if (plugin.enabled("nuker") && clientDig) {
             int tick = Bukkit.getCurrentTick();
             if (d.breakTick == tick) d.breaksThisTick++;
             else {
@@ -118,8 +123,8 @@ public final class BlockListener implements Listener {
         }
 
         // ---- GhostHand / break through walls or without looking ----
-        if (plugin.enabled("ghosthand")) {
-            boolean bad = blockBox.clone().expand(0.3).rayTrace(eye, look, 8.0) == null
+        if (plugin.enabled("ghosthand") && !lagging) {
+            boolean bad = blockBox.clone().expand(0.3 + rotTol).rayTrace(eye, look, 8.0) == null
                     || Phys.blockedBetween(w, eye, blockBox.getCenter(), b);
             if (bad) {
                 double buf = d.addBuf("ghost-break", 1.0);
@@ -152,6 +157,8 @@ public final class BlockListener implements Listener {
             }
         }
 
+        d.breakKey = Long.MIN_VALUE; // consume
+
         if (cancel) e.setCancelled(true);
     }
 
@@ -173,7 +180,9 @@ public final class BlockListener implements Listener {
         }
 
         // ---- Scaffold ----
-        if (plugin.enabled("scaffold")) {
+        if (plugin.enabled("scaffold") && now >= d.lagUntil) {
+            double rotTol = (now - d.rotMs < 150)
+                    ? Math.min(1.0, Math.toRadians(d.yawDelta + d.pitchDelta) * 4.0) : 0.0;
             Location eyeLoc = p.getEyeLocation();
             Vector eye = eyeLoc.toVector();
             Vector look = eyeLoc.getDirection();
@@ -181,7 +190,7 @@ public final class BlockListener implements Listener {
             Block placed = e.getBlock();
             double range = Phys.attr(p, Attribute.BLOCK_INTERACTION_RANGE, 4.5);
 
-            boolean notLooking = BoundingBox.of(against).expand(0.3).rayTrace(eye, look, range + 2.0) == null;
+            boolean notLooking = BoundingBox.of(against).expand(0.3 + rotTol).rayTrace(eye, look, range + 2.0) == null;
             boolean underFeetForward = p.isSprinting() && eyeLoc.getPitch() < 30f
                     && placed.getY() == p.getLocation().getBlockY() - 1
                     && Math.abs(placed.getX() + 0.5 - p.getX()) < 1.0
@@ -210,6 +219,7 @@ public final class BlockListener implements Listener {
         PlayerData d = plugin.data(p);
         if (!plugin.enabled("ghosthand") || !survival(p) || !plugin.shouldCheck(p, d)) return;
 
+        if (System.currentTimeMillis() < d.lagUntil) return;
         Vector eye = p.getEyeLocation().toVector();
         Vector center = BoundingBox.of(clicked).getCenter();
         if (Phys.blockedBetween(p.getWorld(), eye, center, clicked)) {

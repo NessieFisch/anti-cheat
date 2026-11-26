@@ -42,7 +42,7 @@ public final class InventoryListener implements Listener {
 
         if (plugin.enabled("invmove")) {
             boolean moving = p.isSprinting() && d.lastH > 0.15 && now - d.lastMoveMs < 150
-                    && now - d.lastInvOpen > 300 && now - d.lastDisrupt > 1500;
+                    && now - d.lastInvOpen > 1000 && now - d.lastDisrupt > 1500;
             if (moving) {
                 double buf = d.addBuf("invmove", 1.0);
                 if (buf >= plugin.cfg("invmove", "buffer", 3.0)) {

@@ -1,6 +1,5 @@
 package dev.sentinel;
 
-import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -16,12 +15,18 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.util.BoundingBox;
-import org.bukkit.util.RayTraceResult;
-import org.bukkit.util.Vector;
 
 /**
- * Movement checks: speed, fly (gravity prediction), jump, step, nofall (ground spoof), jesus, phase,
- * timer, sprint/omnisprint, noslow, sneak speed, elytra, velocity (anti-knockback), badpackets.
+ * Movement checks.
+ *
+ * IMPORTANT design notes (these are what keep false positives down):
+ *  - Paper only fires PlayerMoveEvent after ~1/16 block of movement, so slow movement (sneaking, eating,
+ *    slow falling, apex of a jump) produces events several ticks apart. Every distance is therefore
+ *    normalised per tick, and tick-exact physics (fly/jump/step) only runs on two back-to-back
+ *    single-tick events.
+ *  - Lag spikes pause checks for a second.
+ *  - Teleports, damage, explosions, vehicles, gamemode changes etc. pause checks (general.disrupt-ms).
+ *  - Every check must trip several times (buffer) before it flags.
  */
 public final class MovementListener implements Listener {
     private final Sentinel plugin;
@@ -43,17 +48,16 @@ public final class MovementListener implements Listener {
         return String.format("%.3f", v);
     }
 
-    /** Start tracking knockback so we can later verify the player actually moved. */
+    /** Start tracking vertical knockback (a player hit on the ground must get launched upward). */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onVelocity(PlayerVelocityEvent e) {
         PlayerData d = plugin.data(e.getPlayer());
-        Vector v = e.getVelocity();
-        double h = Math.hypot(v.getX(), v.getZ());
-        if (h >= 0.3) {
-            d.kbDir = new Vector(v.getX(), 0, v.getZ()).normalize();
-            d.kbExpected = h;
-            d.kbDisp = 0;
-            d.kbTicks = 5;
+        double vy = e.getVelocity().getY();
+        if (vy >= 0.25) {
+            d.kbVy = vy;
+            d.kbStart = System.currentTimeMillis();
+            d.kbMaxDy = -9;
+            d.kbGround = d.lastGround;
         }
     }
 
@@ -68,11 +72,13 @@ public final class MovementListener implements Listener {
         long now = System.currentTimeMillis();
         long dt = now - d.lastMoveMs;
         d.lastMoveMs = now;
+        long prevDt = d.lastDt;
+        d.lastDt = dt;
 
         if (!plugin.shouldCheck(p, d) || plugin.lowTps()) {
             d.hasLast = false;
             d.timerBalance = 0;
-            d.kbTicks = 0;
+            d.kbVy = 0;
             return;
         }
 
@@ -93,20 +99,27 @@ public final class MovementListener implements Listener {
             d.hasLast = false;
             d.airTicks = 0;
             d.timerBalance = 0;
-            d.kbTicks = 0;
+            d.kbVy = 0;
             return;
         }
 
-        boolean disrupted = now - d.lastDisrupt < 1500;
+        // ---------------- lag / timing state ----------------
+        // While moving, events arrive every tick. A long gap right after movement means lag, not cheating.
+        if (d.hasLast && dt > 300 && d.lastH > 0.05) d.lagUntil = now + 1000;
+        boolean lagging = now < d.lagUntil;
+        int ticks = d.hasLast ? (int) Math.max(1, Math.min(10, Math.round(dt / 50.0))) : 1;
+        // true only when this event AND the previous one were each exactly one tick after their predecessor
+        boolean single = d.hasLast && dt <= 75 && prevDt <= 75;
+        boolean disrupted = now - d.lastDisrupt < plugin.disruptMs();
 
         // ---------------- Timer (packet rate) ----------------
         if (plugin.enabled("timer")) {
-            if (disrupted || !d.hasLast) {
+            if (disrupted || !d.hasLast || lagging) {
                 d.timerBalance = 0;
             } else {
                 double credit = plugin.cfg("timer", "max-credit-ms", 1000);
                 d.timerBalance = Math.max(-credit, d.timerBalance + 50.0 - dt);
-                if (d.timerBalance > plugin.cfg("timer", "max-ahead-ms", 200)) {
+                if (d.timerBalance > plugin.cfg("timer", "max-ahead-ms", 250)) {
                     rollback |= vm.flag(p, "timer", "ahead=" + (int) d.timerBalance + "ms");
                     d.timerBalance = 0;
                 }
@@ -117,6 +130,7 @@ public final class MovementListener implements Listener {
         double dy = to.getY() - from.getY();
         double dz = to.getZ() - from.getZ();
         double h = Math.hypot(dx, dz);
+        double hTick = h / ticks;
 
         World w = p.getWorld();
         BoundingBox bbFrom = p.getBoundingBox();
@@ -127,8 +141,10 @@ public final class MovementListener implements Listener {
         int scan = Phys.scan(w, bbTo);
         boolean liquid = (scan & Phys.LIQUID) != 0;
         boolean specialBlock = (scan & Phys.SPECIAL) != 0;
-        if (scan != 0) d.lastSpecial = now;
-        boolean recentSpecial = now - d.lastSpecial < 2000;
+        // effects that change gravity count as "special movement" for a while
+        if (scan != 0 || p.hasPotionEffect(PotionEffectType.SLOW_FALLING)
+                || p.hasPotionEffect(PotionEffectType.LEVITATION)) d.lastSpecial = now;
+        boolean recentSpecial = now - d.lastSpecial < 2500;
 
         boolean ice = Phys.onIce(w, bbTo);
         if (ice) d.lastIce = now;
@@ -136,12 +152,11 @@ public final class MovementListener implements Listener {
 
         boolean glide = p.isGliding();
         if (glide) d.lastGlide = now;
-        boolean recentGlide = now - d.lastGlide < 2000;
+        boolean recentGlide = now - d.lastGlide < 2500;
         if (p.isRiptiding()) d.lastRiptide = now;
-        boolean recentRiptide = now - d.lastRiptide < 2500;
+        boolean recentRiptide = now - d.lastRiptide < 3000;
 
-        boolean consecutive = d.hasLast && dt <= 110;
-        boolean calm = !disrupted && !recentGlide && !recentRiptide
+        boolean calm = !disrupted && !lagging && !recentGlide && !recentRiptide
                 && !p.hasPotionEffect(PotionEffectType.DOLPHINS_GRACE);
 
         d.airTicks = groundTo ? 0 : d.airTicks + 1;
@@ -150,37 +165,41 @@ public final class MovementListener implements Listener {
         PotionEffect jb = p.getPotionEffect(PotionEffectType.JUMP_BOOST);
         int jbLevel = jb == null ? 0 : jb.getAmplifier() + 1;
 
-        // ---------------- Knockback follow-up (anti-KB / velocity) ----------------
-        if (d.kbTicks > 0 && d.kbDir != null) {
-            d.kbDisp += dx * d.kbDir.getX() + dz * d.kbDir.getZ();
-            d.kbTicks--;
-            if (d.kbTicks == 0 && plugin.enabled("velocity") && scan == 0 && !p.isInsideVehicle()
-                    && d.kbDisp < d.kbExpected * plugin.cfg("velocity", "min-ratio", 0.5)) {
-                Location l = p.getLocation();
-                RayTraceResult low = w.rayTraceBlocks(l.clone().add(0, 0.2, 0), d.kbDir, 1.6, FluidCollisionMode.NEVER, true);
-                RayTraceResult high = w.rayTraceBlocks(l.clone().add(0, 1.0, 0), d.kbDir, 1.6, FluidCollisionMode.NEVER, true);
-                if (low == null && high == null) {
+        // ---------------- Vertical knockback follow-up ----------------
+        if (d.kbVy > 0) {
+            long wait = p.getPing() + 60L;
+            long since = now - d.kbStart;
+            if (since > 5000 || lagging) {
+                d.kbVy = 0;
+            } else if (since >= wait && since <= wait + 400) {
+                d.kbMaxDy = Math.max(d.kbMaxDy, dy);
+            } else if (since > wait + 400) {
+                if (plugin.enabled("velocity") && d.kbGround && d.hasLast && scan == 0
+                        && !Phys.headBlocked(w, bbFrom) && d.kbMaxDy < d.kbVy * 0.3) {
                     double buf = d.addBuf("velocity", 1.0);
-                    if (buf >= plugin.cfg("velocity", "buffer", 2.0)) {
-                        vm.flag(p, "velocity", "moved=" + f(d.kbDisp) + " expected=" + f(d.kbExpected));
+                    if (buf >= plugin.cfg("velocity", "buffer", 3.0)) {
+                        vm.flag(p, "velocity", "launched " + f(Math.max(d.kbMaxDy, 0)) + " of " + f(d.kbVy));
                         d.resetBuf("velocity");
                     }
+                } else {
+                    d.decayBuf("velocity", 0.5);
                 }
-            } else if (d.kbTicks == 0) {
-                d.decayBuf("velocity", 0.5);
+                d.kbVy = 0;
             }
         }
 
-        // ---------------- Speed ----------------
-        if (plugin.enabled("speed") && moved && consecutive && calm) {
-            double limit = base * 2.158;
-            limit += (groundTo && groundFrom && d.airTicks == 0) ? 0.04 : plugin.cfg("speed", "air-bonus", 0.32);
+        // ---------------- Speed (per-tick, sprint always allowed) ----------------
+        if (plugin.enabled("speed") && moved && d.hasLast && calm) {
+            double walk = p.isSprinting() ? base / 1.3 : base;
+            double limit = walk * 1.3 * 2.158;
+            limit += (groundTo && groundFrom && d.airTicks == 0) ? 0.05 : plugin.cfg("speed", "air-bonus", 0.35);
+            if (liquid) limit += 0.12;
             if (recentIce) limit *= 1.9;
-            limit *= plugin.cfg("speed", "tolerance", 1.08);
-            if (h > limit) {
-                double buf = d.addBuf("speed", 1.0 + (h / limit - 1.0) * 4.0);
-                if (buf >= plugin.cfg("speed", "buffer", 4.0)) {
-                    rollback |= vm.flag(p, "speed", "h=" + f(h) + " max=" + f(limit));
+            limit *= plugin.cfg("speed", "tolerance", 1.12);
+            if (hTick > limit) {
+                double buf = d.addBuf("speed", 1.0 + (hTick / limit - 1.0) * 4.0);
+                if (buf >= plugin.cfg("speed", "buffer", 6.0)) {
+                    rollback |= vm.flag(p, "speed", "h/tick=" + f(hTick) + " max=" + f(limit));
                     d.resetBuf("speed");
                 }
             } else {
@@ -188,17 +207,16 @@ public final class MovementListener implements Listener {
             }
         }
 
-        // ---------------- Fly (gravity prediction) ----------------
-        if (plugin.enabled("fly") && consecutive && calm && scan == 0 && !recentSpecial && !groundTo
-                && d.airTicks >= 3 && !p.isClimbing()
-                && !p.hasPotionEffect(PotionEffectType.LEVITATION)
+        // ---------------- Fly (gravity prediction, single-tick events only) ----------------
+        if (plugin.enabled("fly") && single && calm && scan == 0 && !recentSpecial && !groundTo
+                && d.airTicks >= 4 && !p.isClimbing()
                 && !Phys.headBlocked(w, bbTo)) {
             double g = Phys.attr(p, Attribute.GRAVITY, 0.08);
             double predicted = (d.lastDy - g) * 0.98;
             double diff = dy - predicted;
-            if (diff > plugin.cfg("fly", "max-diff", 0.05) && !Phys.nearGroundEntity(p)) {
+            if (diff > plugin.cfg("fly", "max-diff", 0.08) && !Phys.nearGroundEntity(p)) {
                 double buf = d.addBuf("fly", 1.0);
-                if (buf >= plugin.cfg("fly", "buffer", 4.0)) {
+                if (buf >= plugin.cfg("fly", "buffer", 6.0)) {
                     rollback |= vm.flag(p, "fly", "dy=" + f(dy) + " expected=" + f(predicted));
                     d.resetBuf("fly");
                 }
@@ -208,25 +226,27 @@ public final class MovementListener implements Listener {
         }
 
         // ---------------- Jump height ----------------
-        if (plugin.enabled("jump") && consecutive && calm && !recentSpecial && groundFrom && !groundTo && dy > 0) {
+        if (plugin.enabled("jump") && single && calm && !recentSpecial && groundFrom && !groundTo && dy > 0) {
             double max = Phys.attr(p, Attribute.JUMP_STRENGTH, 0.42) + 0.1 * jbLevel
-                    + plugin.cfg("jump", "tolerance", 0.16);
+                    + plugin.cfg("jump", "tolerance", 0.3);
             if (dy > max) {
                 rollback |= vm.flag(p, "jump", "dy=" + f(dy) + " max=" + f(max));
             }
         }
 
         // ---------------- Step ----------------
-        if (plugin.enabled("step") && moved && consecutive && calm && !recentSpecial && groundFrom && groundTo
-                && dy > Phys.attr(p, Attribute.STEP_HEIGHT, 0.6) + 0.1) {
+        if (plugin.enabled("step") && single && calm && !recentSpecial && groundFrom && groundTo
+                && dy > Phys.attr(p, Attribute.STEP_HEIGHT, 0.6) + 0.15) {
             rollback |= vm.flag(p, "step", "dy=" + f(dy));
         }
 
-        // ---------------- NoFall / ground spoof ----------------
-        if (plugin.enabled("nofall") && consecutive && calm && scan == 0 && !recentSpecial
-                && p.isOnGround() && !groundTo && !groundFrom && d.airTicks >= 2 && !Phys.nearGroundEntity(p)) {
+        // ---------------- NoFall / ground spoof (strict) ----------------
+        if (plugin.enabled("nofall") && single && calm && scan == 0 && !recentSpecial
+                && p.isOnGround() && !groundTo && !groundFrom && d.airTicks >= 4
+                && !Phys.groundBelow(w, bbTo, 0.35) && !Phys.groundBelow(w, bbFrom, 0.35)
+                && !Phys.nearGroundEntity(p)) {
             double buf = d.addBuf("nofall", 1.0);
-            if (buf >= plugin.cfg("nofall", "buffer", 3.0)) {
+            if (buf >= plugin.cfg("nofall", "buffer", 5.0)) {
                 rollback |= vm.flag(p, "nofall", "claims ground while airborne");
                 d.resetBuf("nofall");
             }
@@ -234,9 +254,9 @@ public final class MovementListener implements Listener {
             d.decayBuf("nofall", 0.25);
         }
 
-        // ---------------- Jesus (experimental) ----------------
-        if (plugin.enabled("jesus") && moved && consecutive && calm && liquid && !specialBlock && !groundTo
-                && !p.isSwimming() && !p.isClimbing() && h > 0.12 && Math.abs(dy) < 0.002
+        // ---------------- Jesus (experimental, off by default) ----------------
+        if (plugin.enabled("jesus") && moved && single && calm && liquid && !specialBlock && !groundTo
+                && !p.isSwimming() && !p.isClimbing() && hTick > 0.12 && Math.abs(dy) < 0.002
                 && !Phys.nearGroundEntity(p)) {
             double buf = d.addBuf("jesus", 1.0);
             if (buf >= plugin.cfg("jesus", "buffer", 14.0)) {
@@ -247,8 +267,8 @@ public final class MovementListener implements Listener {
             d.resetBuf("jesus");
         }
 
-        // ---------------- Phase / noclip ----------------
-        if (plugin.enabled("phase") && moved && h > 0.05 && calm && !p.isSleeping()) {
+        // ---------------- Phase (off by default: vanilla already blocks moving into blocks) ----------------
+        if (plugin.enabled("phase") && moved && single && h > 0.05 && calm && !p.isSleeping()) {
             BoundingBox innerTo = bbTo.clone().expand(-0.11);
             if (Phys.collides(w, innerTo) && !Phys.collides(w, bbFrom.clone().expand(-0.11))) {
                 double buf = d.addBuf("phase", 1.0);
@@ -265,19 +285,19 @@ public final class MovementListener implements Listener {
         if (plugin.enabled("sprint") && moved && calm) {
             if (p.isSprinting() && p.getFoodLevel() <= 6) {
                 double buf = d.addBuf("sprint-food", 1.0);
-                if (buf >= 5) {
+                if (buf >= plugin.cfg("sprint", "food-buffer", 15.0)) {
                     rollback |= vm.flag(p, "sprint", "sprinting with food=" + p.getFoodLevel());
                     d.resetBuf("sprint-food");
                 }
             } else {
                 d.decayBuf("sprint-food", 1.0);
             }
-            if (p.isSprinting() && groundTo && groundFrom && h > 0.22 && !recentIce) {
+            if (single && p.isSprinting() && groundTo && groundFrom && h > 0.22 && !recentIce) {
                 double yawRad = Math.toRadians(to.getYaw());
                 double dot = (dx * -Math.sin(yawRad) + dz * Math.cos(yawRad)) / h;
                 if (dot < -0.1736) { // moving > 100 degrees away from where they look
                     double buf = d.addBuf("sprint-omni", 1.0);
-                    if (buf >= 10) {
+                    if (buf >= plugin.cfg("sprint", "omni-buffer", 12.0)) {
                         rollback |= vm.flag(p, "sprint", "omni-directional sprint");
                         d.resetBuf("sprint-omni");
                     }
@@ -288,33 +308,33 @@ public final class MovementListener implements Listener {
         }
 
         // ---------------- NoSlow (item use) + sneak speed ----------------
-        if (plugin.enabled("noslow") && moved && consecutive && calm && groundTo && groundFrom && !recentIce) {
-            boolean using = p.isHandRaised() && now - d.lastUseStart > 500;
+        if (plugin.enabled("noslow") && moved && d.hasLast && calm && groundTo && groundFrom && !recentIce) {
+            boolean using = p.isHandRaised() && now - d.lastUseStart > 800;
             boolean flagged = false;
             String detail = "";
             if (using) {
                 double walk = p.isSprinting() ? base / 1.3 : base;
-                double limit = walk * 2.158 * 0.5 + 0.02;
+                double limit = walk * 2.158 * 0.5 + 0.03;
                 if (p.isSprinting()) {
                     flagged = true;
                     detail = "sprinting while using item";
-                } else if (h > limit) {
+                } else if (hTick > limit) {
                     flagged = true;
-                    detail = "h=" + f(h) + " max=" + f(limit) + " while using item";
+                    detail = "h/tick=" + f(hTick) + " max=" + f(limit) + " while using item";
                 }
-            } else if (p.isSneaking() && now - d.lastSneakToggle > 400 && !p.isHandRaised()) {
+            } else if (p.isSneaking() && now - d.lastSneakToggle > 600 && !p.isHandRaised()) {
                 ItemStack legs = p.getInventory().getLeggings();
                 int swift = legs == null ? 0 : legs.getEnchantmentLevel(Enchantment.SWIFT_SNEAK);
                 double factor = Math.min(1.0, 0.3 + 0.15 * swift);
-                double limit = base * 2.158 * factor * 1.25 + 0.03;
-                if (h > limit) {
+                double limit = base * 2.158 * factor * 1.4 + 0.04;
+                if (hTick > limit) {
                     flagged = true;
-                    detail = "h=" + f(h) + " max=" + f(limit) + " while sneaking";
+                    detail = "h/tick=" + f(hTick) + " max=" + f(limit) + " while sneaking";
                 }
             }
             if (flagged) {
                 double buf = d.addBuf("noslow", 1.0);
-                if (buf >= plugin.cfg("noslow", "buffer", 6.0)) {
+                if (buf >= plugin.cfg("noslow", "buffer", 8.0)) {
                     rollback |= vm.flag(p, "noslow", detail);
                     d.resetBuf("noslow");
                 }
@@ -324,14 +344,14 @@ public final class MovementListener implements Listener {
         }
 
         // ---------------- Elytra ----------------
-        if (plugin.enabled("elytra") && glide && consecutive && !disrupted) {
+        if (plugin.enabled("elytra") && glide && single && !disrupted && !lagging) {
             double speed = Math.sqrt(dx * dx + dy * dy + dz * dz);
             if (speed > plugin.cfg("elytra", "max-speed", 4.0)) {
                 rollback |= vm.flag(p, "elytra", "speed=" + f(speed));
             }
-            if (!groundTo && d.airTicks > 5 && h < 0.02 && Math.abs(dy) < 0.02) {
+            if (scan == 0 && !groundTo && d.airTicks > 5 && h < 0.02 && Math.abs(dy) < 0.02) {
                 double buf = d.addBuf("elytra-hover", 1.0);
-                if (buf >= 6) {
+                if (buf >= 8) {
                     rollback |= vm.flag(p, "elytra", "hovering while gliding");
                     d.resetBuf("elytra-hover");
                 }
@@ -348,11 +368,11 @@ public final class MovementListener implements Listener {
             return;
         }
 
-        // ---------------- state for next tick ----------------
+        // ---------------- state for next event ----------------
         d.lastDx = dx;
         d.lastDy = dy;
         d.lastDz = dz;
-        d.lastH = h;
+        d.lastH = hTick;
         d.lastGround = groundTo;
         d.hasLast = true;
         d.history.addLast(new PlayerData.Pos(now, to.getX(), to.getY(), to.getZ()));

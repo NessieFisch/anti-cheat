@@ -62,6 +62,18 @@ public final class Sentinel extends JavaPlugin {
         return violations;
     }
 
+    private boolean hasExemptPrefix(String name) {
+        for (String prefix : getConfig().getStringList("general.exempt-name-prefixes")) {
+            if (!prefix.isEmpty() && name.startsWith(prefix)) return true;
+        }
+        return false;
+    }
+
+    /** How long (ms) checks back off after teleports, knockback, damage, etc. */
+    public long disruptMs() {
+        return getConfig().getLong("general.disrupt-ms", 2500L);
+    }
+
     public boolean lowTps() {
         return lowTps;
     }
@@ -78,7 +90,7 @@ public final class Sentinel extends JavaPlugin {
     public boolean shouldCheck(Player p, PlayerData d) {
         long now = System.currentTimeMillis();
         if (now - d.permCheckedAt > 5000) {
-            d.bypass = p.hasPermission("sentinel.bypass");
+            d.bypass = p.hasPermission("sentinel.bypass") || hasExemptPrefix(p.getName());
             d.permCheckedAt = now;
         }
         if (d.bypass) return false;

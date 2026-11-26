@@ -1,31 +1,37 @@
 # ==========================================================================
-# Sentinel - event-based PvP anticheat for Paper 26.2
+# Sentinel 1.1 - event-based PvP anticheat for Paper 26.2
 #
 # SAFE START: punishments are OFF. Run alert-only for a few days, watch the
 # alerts (and plugins/Sentinel/violations.log), tune thresholds, THEN enable
 # punishments.
+#
+# If a check keeps flagging legit players on your server: raise its "buffer"
+# or "tolerance", or set enabled: false, then run /sentinel reload.
 # ==========================================================================
 
 general:
-  max-ping: 600        # players above this ping are not checked (avoids lag false positives)
-  min-tps: 18.0        # movement checks pause while the server TPS is below this
+  max-ping: 600          # players above this ping are not checked
+  min-tps: 18.0          # movement checks pause while the server TPS is below this
+  disrupt-ms: 2500       # checks back off this long after teleport/knockback/damage/explosion/etc.
+  exempt-name-prefixes:  # Bedrock (Geyser/Floodgate) players use touch/controller input and false-flag easily
+    - "."
 
 alerts:
-  min-vl: 1.0          # only alert once a check's violation level reaches this
-  cooldown-ms: 400     # min time between alerts for the same player+check
+  min-vl: 2.0            # only alert once a check's violation level reaches this
+  cooldown-ms: 400
   format: "&8[&cSentinel&8] &f%player% &7flagged &c%check% &8(&7vl %vl%&8) &7%detail% &8| &7%ping%ms"
 
 logging:
   console: true
-  file: true           # plugins/Sentinel/violations.log
+  file: true             # plugins/Sentinel/violations.log
 
 violations:
-  decay-per-minute: 4.0   # every check's VL drops by this much per minute
+  decay-per-minute: 5.0
 
-# Rubber-band movement / cancel hits & actions once a check reaches this VL.
+# Rubber-band movement / cancel hits and actions once a check reaches this VL.
 setback:
   enabled: true
-  min-vl: 4.0
+  min-vl: 8.0
 
 combat:
   cancel-flagged-hits: true
@@ -36,56 +42,58 @@ punishments:
   enabled: false
   actions:
     - check: "*"
-      vl: 60
+      vl: 80
       commands:
         - "kick %player% Unfair advantage detected"
     # Example: ban for obvious reach
     # - check: "reach"
-    #   vl: 30
+    #   vl: 40
     #   commands:
     #     - "ban %player% Cheating (reach)"
 
 checks:
   # ---------------- Movement ----------------
-  speed:       { enabled: true, weight: 1.0, tolerance: 1.08, air-bonus: 0.32, buffer: 4.0 }
-  fly:         { enabled: true, weight: 1.0, max-diff: 0.05, buffer: 4.0 }
-  jump:        { enabled: true, weight: 1.0, tolerance: 0.16 }
+  speed:       { enabled: true, weight: 1.0, tolerance: 1.12, air-bonus: 0.35, buffer: 6.0 }
+  fly:         { enabled: true, weight: 1.0, max-diff: 0.08, buffer: 6.0 }
+  jump:        { enabled: true, weight: 1.0, tolerance: 0.3 }
   step:        { enabled: true, weight: 1.0 }
-  nofall:      { enabled: true, weight: 1.0, buffer: 3.0 }
-  jesus:       { enabled: true, weight: 1.0, buffer: 14.0 }   # experimental
-  phase:       { enabled: true, weight: 2.0, buffer: 3.0 }
-  timer:       { enabled: true, weight: 2.0, max-ahead-ms: 200, max-credit-ms: 1000 }
-  sprint:      { enabled: true, weight: 1.0 }
-  noslow:      { enabled: true, weight: 1.0, buffer: 6.0 }
+  nofall:      { enabled: true, weight: 1.0, buffer: 5.0 }
+  jesus:       { enabled: false, weight: 1.0, buffer: 14.0 }   # experimental
+  phase:       { enabled: false, weight: 2.0, buffer: 3.0 }    # vanilla already blocks this
+  timer:       { enabled: true, weight: 2.0, max-ahead-ms: 250, max-credit-ms: 1000 }
+  sprint:      { enabled: true, weight: 1.0, food-buffer: 15.0, omni-buffer: 12.0 }
+  noslow:      { enabled: true, weight: 1.0, buffer: 8.0 }
   elytra:      { enabled: true, weight: 1.0, max-speed: 4.0 }
-  velocity:    { enabled: true, weight: 1.0, min-ratio: 0.5, buffer: 2.0 }   # anti-knockback
+  velocity:    { enabled: true, weight: 1.0, buffer: 3.0 }     # anti-knockback (vertical)
   badpackets:  { enabled: true, weight: 5.0 }
 
   # ---------------- Combat ----------------
-  reach:            { enabled: true, weight: 2.0, tolerance: 0.3 }
+  reach:            { enabled: true, weight: 2.0, tolerance: 0.4, buffer: 2.0 }
   hitbox:           { enabled: true, weight: 2.0, expand: 0.1, buffer: 2.0 }
   wallhit:          { enabled: true, weight: 2.0, buffer: 3.0 }
   killaura:         { enabled: true, weight: 3.0, buffer: 3.0 }    # multi-target in one tick
   aim:              { enabled: true, weight: 3.0, min-avg-angle: 0.4 }
-  autoclicker:      { enabled: true, weight: 1.0, max-cps: 22, min-stddev-ms: 7 }
+  autoclicker:      { enabled: true, weight: 1.0, max-cps: 24, buffer: 2.0, min-stddev-ms: 5, sd-buffer: 6.0 }
   noswing:          { enabled: true, weight: 2.0, buffer: 2.0 }
-  attackwhileusing: { enabled: true, weight: 3.0, buffer: 2.0 }
-  criticals:        { enabled: true, weight: 2.0, buffer: 3.0 }
+  # Off by default: servers using 1.8-style sword blocking (ViaVersion / OldCombatMechanics) allow this legitimately.
+  attackwhileusing: { enabled: false, weight: 3.0, buffer: 2.0 }
+  criticals:        { enabled: true, weight: 2.0, buffer: 4.0 }
 
   # ---------------- World / blocks ----------------
-  fastbreak:   { enabled: true, weight: 2.0, ratio: 0.65, buffer: 2.0 }
+  fastbreak:   { enabled: true, weight: 2.0, ratio: 0.6, buffer: 2.0 }
   nuker:       { enabled: true, weight: 3.0, max-per-tick: 2, max-per-second: 30 }
   blockreach:  { enabled: true, weight: 2.0, tolerance: 0.8 }
-  ghosthand:   { enabled: true, weight: 2.0, buffer: 3.0 }
-  fastplace:   { enabled: true, weight: 1.0, max-per-second: 16 }
-  scaffold:    { enabled: true, weight: 2.0, buffer: 3.0 }
-  xray:        { enabled: true, weight: 1.0, window-blocks: 150, min-rare: 5, max-ratio: 0.04 }   # alert only, see README
+  ghosthand:   { enabled: true, weight: 1.0, buffer: 4.0 }
+  fastplace:   { enabled: true, weight: 1.0, max-per-second: 24 }
+  scaffold:    { enabled: true, weight: 1.0, buffer: 4.0 }
+  xray:        { enabled: true, weight: 1.0, window-blocks: 150, min-rare: 5, max-ratio: 0.04 }   # alert only
 
   # ---------------- Inventory / items ----------------
-  fastclick:   { enabled: true, weight: 2.0, max-per-500ms: 14 }
-  invmove:     { enabled: true, weight: 1.0, buffer: 3.0 }
-  fastbow:     { enabled: true, weight: 2.0, tolerance: 0.2 }
-  fasteat:     { enabled: true, weight: 2.0, min-ms: 700, buffer: 2.0 }   # disable if you use custom consume times
+  fastclick:   { enabled: true, weight: 2.0, max-per-500ms: 25 }
+  invmove:     { enabled: true, weight: 1.0, buffer: 4.0 }
+  # Off by default: the server counts item-use time itself, so vanilla clients cannot speed these up.
+  fastbow:     { enabled: false, weight: 2.0, tolerance: 0.3 }
+  fasteat:     { enabled: false, weight: 2.0, min-ms: 700, buffer: 2.0 }
 
   # ---------------- Client ----------------
   clientbrand:
@@ -98,5 +106,3 @@ checks:
       - "wurst"
       - "aristois"
       - "liquidbounce"
-      - "impact"
-      - "future"

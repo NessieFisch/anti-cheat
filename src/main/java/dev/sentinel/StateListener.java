@@ -81,7 +81,7 @@ public final class StateListener implements Listener {
         d.hasLast = false;
         d.timerBalance = 0;
         d.airTicks = 0;
-        d.kbTicks = 0;
+        d.kbVy = 0;
         d.history.clear();
         // our own setback teleports must not grant a free exemption window
         if (now - d.lastSetback > 300) d.lastDisrupt = now;

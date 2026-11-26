@@ -71,6 +71,9 @@ public final class CombatListener implements Listener {
         long now = System.currentTimeMillis();
         int tick = Bukkit.getCurrentTick();
         boolean cancel = false;
+        // lag spikes bunch packets together and wreck position/timing based checks
+        boolean lagging = now < d.lagUntil;
+        boolean creative = gm == GameMode.CREATIVE;
 
         World w = a.getWorld();
         Location eyeLoc = a.getEyeLocation();
@@ -84,15 +87,21 @@ public final class CombatListener implements Listener {
         // ---------- Reach ----------
         double minDist = Double.MAX_VALUE;
         for (BoundingBox b : boxes) minDist = Math.min(minDist, Phys.distToBox(eye, b));
-        if (plugin.enabled("reach") && !a.isInsideVehicle()) {
-            double allowed = range + plugin.cfg("reach", "tolerance", 0.3);
+        if (plugin.enabled("reach") && !a.isInsideVehicle() && !lagging && !creative) {
+            double allowed = range + plugin.cfg("reach", "tolerance", 0.4);
             if (minDist > allowed) {
-                cancel |= vm.flag(a, "reach", "dist=" + f(minDist) + " max=" + f(allowed));
+                double buf = d.addBuf("reach", 1.0);
+                if (buf >= plugin.cfg("reach", "buffer", 2.0)) {
+                    cancel |= vm.flag(a, "reach", "dist=" + f(minDist) + " max=" + f(allowed));
+                    d.resetBuf("reach");
+                }
+            } else {
+                d.decayBuf("reach", 0.5);
             }
         }
 
         // ---------- Hitbox / killaura (is the target actually under the crosshair?) ----------
-        if (plugin.enabled("hitbox")) {
+        if (plugin.enabled("hitbox") && !lagging && !creative) {
             double rotTol = 0;
             if (now - d.rotMs < 150) {
                 rotTol = Math.min(1.0, Math.toRadians(d.yawDelta + d.pitchDelta) * Math.max(minDist, 1.0));
@@ -117,7 +126,7 @@ public final class CombatListener implements Listener {
         }
 
         // ---------- Hits through walls ----------
-        if (plugin.enabled("wallhit")) {
+        if (plugin.enabled("wallhit") && !lagging) {
             if (Phys.blockedBetween(w, eye, cur.getCenter(), null)) {
                 double buf = d.addBuf("wallhit", 1.0);
                 if (buf >= plugin.cfg("wallhit", "buffer", 3.0)) {
@@ -130,7 +139,7 @@ public final class CombatListener implements Listener {
         }
 
         // ---------- Multi-aura (two different targets in the same tick) ----------
-        if (plugin.enabled("killaura")) {
+        if (plugin.enabled("killaura") && !lagging) {
             if (d.lastTarget != null && !d.lastTarget.equals(victim.getUniqueId()) && d.lastAttackTick == tick) {
                 double buf = d.addBuf("multi", 1.0);
                 if (buf >= plugin.cfg("killaura", "buffer", 3.0)) {
@@ -162,7 +171,7 @@ public final class CombatListener implements Listener {
         }
 
         // ---------- NoSwing (attacked twice with no arm swing in between) ----------
-        if (plugin.enabled("noswing")) {
+        if (plugin.enabled("noswing") && !lagging) {
             if (d.hadAttack && !d.swingSinceAttack && now - d.lastAttackMs < 1500) {
                 double buf = d.addBuf("noswing", 1.0);
                 if (buf >= plugin.cfg("noswing", "buffer", 2.0)) {
@@ -232,9 +241,16 @@ public final class CombatListener implements Listener {
         if (!plugin.enabled("autoclicker")) return;
 
         int cps = d.clicks.size();
-        if (cps > plugin.cfg("autoclicker", "max-cps", 22)) {
-            vm.flag(p, "autoclicker", "cps=" + cps);
+        if (now < d.lagUntil) return; // packet bursts after lag look like fast clicking
+        if (cps > plugin.cfg("autoclicker", "max-cps", 24)) {
+            double buf = d.addBuf("cps", 1.0);
+            if (buf >= plugin.cfg("autoclicker", "buffer", 2.0)) {
+                vm.flag(p, "autoclicker", "cps=" + cps);
+                d.resetBuf("cps");
+            }
             return;
+        } else {
+            d.decayBuf("cps", 0.1);
         }
         if (cps >= 10) {
             Long[] t = d.clicks.toArray(new Long[0]);
@@ -250,7 +266,7 @@ public final class CombatListener implements Listener {
             double sd = Math.sqrt(var / iv.length);
             if (sd < plugin.cfg("autoclicker", "min-stddev-ms", 7)) {
                 double buf = d.addBuf("clicker-sd", 1.0);
-                if (buf >= 3) {
+                if (buf >= plugin.cfg("autoclicker", "sd-buffer", 6.0)) {
                     vm.flag(p, "autoclicker", "robotic timing sd=" + f(sd) + "ms cps=" + cps);
                     d.resetBuf("clicker-sd");
                 }

@@ -1,7 +1,5 @@
 package dev.sentinel;
 
-import org.bukkit.util.Vector;
-
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.Map;
@@ -36,10 +34,11 @@ public final class PlayerData {
     public long lastDisrupt, lastGlide, lastRiptide, lastSpecial, lastIce;
     public long lastSneakToggle, lastSetback, lastUseStart, lastInvOpen;
 
-    // knockback tracking
-    public Vector kbDir;
-    public double kbExpected, kbDisp;
-    public int kbTicks;
+    // vertical knockback follow-up + lag tracking
+    public double kbVy, kbMaxDy;
+    public long kbStart;
+    public boolean kbGround;
+    public long lagUntil, lastDt;
 
     // combat
     public final ArrayDeque<Long> clicks = new ArrayDeque<>();
